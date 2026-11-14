@@ -6,7 +6,7 @@
 
 原流程用 `cenyue_pulp_202611.csv` 的检测值和报价在Excel手调比例。三个痛点是质量界限相互冲突、名义低成本配方对波动脆弱、成本/属性扰动没有统一口径。上游为模拟原浆中心属性、报价、供给上下限与误差宽度；本项目替代名义配比求解和固定配方评价；下游由配方组对照实验与真实工艺复核。
 
-六实体贯穿数据库、Python Model/Schema/Service/Controller/Route、Vue API/Store/页面：PulpDataset、QualitySpec、BlendScenario、BlendRun、FormulaReview、Report。六业务页为总览、原浆检测、质量窗口、试算情景、运行底稿、配方归档，另有管理员审计。
+六实体贯穿数据库、Python Model/Schema/Service/Controller/Route、Vue API/Store/页面：PulpDataset、QualitySpec、BlendScenario、BlendRun、FormulaReview、Report。六业务页为总览、原浆检测、质量窗口、试算情景、运行底稿、配方归档，另有管理员审计。联合排产另设 JointPlan、JointRun 两实体和“联合排产 / 联合底稿”两页：同一批原浆与库存上，多纸种各自带质量窗口和吨数同时排产。
 
 ## 启动与技术
 
@@ -25,12 +25,12 @@ docker compose exec -T backend python -m scripts.seed_demo
 | 后端 | Python3.12、FastAPI0.115.6、SQLAlchemy2.0.36 |
 | 数值 | NumPy2.2.1、SciPy1.14.1 linprog/HiGHS |
 | 存储 | MySQL8.4 LTS、Redis7.4，六个质量界限列均DOUBLE |
-| 后台 | 独立worker、Redis队列、MySQL保存结果与不可变报告 |
+| 后台 | 独立worker、Redis两条队列（单配方/联合排产）、MySQL保存结果与不可变报告 |
 | 网关 | Nginx1.28，SPA回落，健康检查127.0.0.1 |
 
 五服务恰好frontend/backend/worker/db/redis，全部healthcheck，数据库/Redis/共享产物具名卷。清理 `docker compose down -v --remove-orphans`；保留数据时省略 `-v`。
 
-结构：`backend/src/{models,schemas,services,controllers,routes}`按六实体分层，`services/materials.py`校验CSV，`linear_blend.py`求名义配方，`lhs_robustness.py`构造LHS并评价固定配方；`config,utils,middlewares`提供配置/数据库/认证/队列/审计/错误。种子 `backend/scripts/seed_demo.py`；`migrations/001_schema.sql`说明新库基线，实际启动以元数据建表。前端 `src/{api,stores,types,constants,hooks,utils,router,pages}`；RecipeBars、QualityTable、SampleCloud用于总览/结果/归档。测试、日志、截图在批次外层 `test-artifacts/gb-2306`，不放本源码目录。
+结构：`backend/src/{models,schemas,services,controllers,routes}`按实体分层，`services/materials.py`校验CSV，`linear_blend.py`求名义配方，`lhs_robustness.py`构造LHS并评价固定配方，`joint_blend.py`求半吨整包联合排产，`joint_service.py`校验方案并落库；`config,utils,middlewares`提供配置/数据库/认证/队列/审计/错误。种子 `backend/scripts/seed_demo.py`；`migrations/001_schema.sql`说明新库基线，实际启动以元数据建表。前端 `src/{api,stores,types,constants,hooks,utils,router,pages}`；RecipeBars、QualityTable、SampleCloud用于总览/结果/归档。测试、日志、截图在批次外层 `test-artifacts/gb-2306`，不放本源码目录。
 
 本地开发：安装requirements并设置可用DATABASE_URL/REDIS_URL，从backend运行 `uvicorn src.main:app --reload`，另起 `python -m src.worker`；前端 `npm ci && npm run dev`，构建 `npm run build`。默认OpenBLAS/OMP线程1，避免小型试算占满主机。
 
@@ -60,7 +60,7 @@ cost为元/吨，正且≤1e6；min_share/max_share为0至1的比例且下界≤
 
 规格六个上下界必须有序且在上述物理范围。每个情景20至2000个LHS样本、非负整数seed，成本扰动开关独立保存。
 
-## 两个真实Python算法
+## 三个真实Python算法
 
 名义LP为：
 
@@ -76,6 +76,18 @@ LHS每维u_j=(该维随机排列的0..N−1 + 独立U[0,1)抖动)/N，保证每�
 
 强度、白度、回收率线性混合只是此模拟的声明假设；真实纸业可能存在非线性与相关误差。本项目不处理这些工艺效应。模拟分位不是置信区间，样本通过率不是实际质量认证或保证概率。
 
+### 联合排产（半吨整包整数规划）
+
+JointPlan保存同一原浆批次、1至8个订单（各带订单编号、纸种名、吨数、质量窗口）以及每种原浆的库存吨数；提交时要求库存覆盖该批次全部原浆（可以为0），吨数必须是0.5吨整包，订单编号唯一。JointRun由worker从独立Redis队列消费，单次计算上限30秒。
+
+决策变量为每纸种对每种原浆的**整包数**（非负整数，最多8×20=160个）。模型为：
+
+`min Σ_j Σ_i 0.5·cost_i·k_ji`，约束每单 `Σ_i k_ji = 吨数_j/0.5`、每单每原浆 `min_share_i ≤ k_ji/(吨数_j/0.5) ≤ max_share_i`、每单三属性 `quality_min_j·包数_j ≤ Σ_i property_i·k_ji ≤ quality_max_j·包数_j`、共享库存 `0.5·Σ_j k_ji ≤ 库存_i`。
+
+先用HiGHS线性松弛得到下界并排除连续不可行；再用SciPy `milp`（HiGHS分支定界，`mip_rel_gap=0`）求整数最优，剩余时间从30秒预算中扣除，超时即降级。任何返回方案都用**与求解器独立的**比例/质量/整包/库存核验（绝对容差1e-7）重新计算，未通过则记为failed，不冒充可行。
+
+结果状态：`optimal`（已证整数最优，差距记为0）、`timeout`（30秒内未证最优，但给出已核验可行方案，并附成本下界和差距=(方案成本−下界)/方案成本）、`infeasible`（仅当连续松弛或整数模型由求解器判定不可行；诊断区分“连续配方已冲突”与“连续可行但整包无解”）、`undetermined`（时限内无可核验方案，例如求解未开始或数值未决，**不判无解**）、`failed`（数值失败或核验未通过）。下界取整数松弛值与整数对偶界的较大者，绝不高于已证最优值。
+
 ## 演示工作日
 
 Seed包含8种原浆、价格/供给/三属性及误差宽度，默认强度≥70、白度≥80%、回收纤维率≥25%，400个样本，seed20261112，成本扰动开启。
@@ -88,11 +100,13 @@ Seed包含8种原浆、价格/供给/三属性及误差宽度，默认强度≥7
 6. 09:24 查看固定配方LHS通过数与失败样本，对照成本分位与质量余量。
 7. 09:30 分析师提交配方复核，管理员批准假设与结论边界。
 8. 09:36 下载配方CSV和完整扰动样本CSV，保留相同的比例与比较容差。
+9. 09:42 打开“联合排产”，查看四纸种共享十一月原浆库存的方案：各单整包用量、各单质量余量与共享库存结余；再对照“四纸种库存充裕对照”的成本差。
+10. 09:50 核查“纸箱芯纸整包无解示例”：连续配方可行但半吨整包无解，页面明确区分两者，不冒报“无配方”；核查“四纸种库存偏紧冲突”的连续冲突诊断。
 
-自然键种子幂等；重复执行不覆盖用户修改说明。
+自然键种子幂等；重复执行不覆盖用户修改说明。种子内置3个联合方案与3次联合运行。
 
 ## 已知差异
 
-MySQL采用8.4 LTS而非8.0；Redis列表无worker崩溃自动重投/取消；新库建表无存量版本化迁移回滚；实体列表最多200条。仅模拟有限CSV原浆和独立均匀误差，没有真实供应商接口、工厂配方下发、非线性混合、相关误差或真实质量认证。Google Fonts断网时回退字体。
+MySQL采用8.4 LTS而非8.0；Redis列表无worker崩溃自动重投/取消；新库建表无存量版本化迁移回滚；实体列表最多200条。联合排产上限8订单×20原浆、计算预算30秒，超时只保证“已核验可行解+下界+差距”，不保证最优；下界为对偶界，非工业可执行承诺。仅模拟有限CSV原浆和独立均匀误差，没有真实供应商接口、工厂配方下发、非线性混合、相关误差或真实质量认证。Google Fonts断网时回退字体。
 
 MIT License。真实检查见批次 `test-artifacts/gb-2306/TESTING.md`。

@@ -1,3 +1,5 @@
 -- New MySQL baseline created by SQLAlchemy metadata: datasets, specs, scenarios, runs, reviews, reports, users, audits.
 -- All six physical quality bounds are DOUBLE. Dataset attributes and widths use JSON number values.
+-- Joint scheduling adds joint_plans (orders JSON, inventory JSON, time_limit_seconds DOUBLE) and joint_runs (status, result JSON, error, elapsed_seconds DOUBLE).
+-- Every joint run stores pack-level integer allocation, per-order quality slacks, inventory balances, cost lower bound, gap and independent verification outcome.
 -- Existing deployments need reviewed migrations; no destructive automatic upgrades.

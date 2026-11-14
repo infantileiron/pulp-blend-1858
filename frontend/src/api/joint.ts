@@ -1,0 +1,1 @@
+import {request} from "./client";export const fetchJointPlans=()=>request("/joint-plans");export const createJointPlan=(body:unknown)=>request("/joint-plans","POST",body);export const fetchJointRuns=()=>request("/joint-plans/runs");export const createJointRun=(body:unknown)=>request("/joint-plans/runs","POST",body);

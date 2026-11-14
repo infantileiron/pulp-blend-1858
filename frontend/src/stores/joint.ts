@@ -1,0 +1,3 @@
+import {ref} from 'vue';import {request} from '../api/client';import type {Entity} from '../types/domain';
+export function jointStore(resource:string){const items=ref<Entity[]>([]);const error=ref('');const busy=ref(false);async function load(){busy.value=true;try{items.value=await request('/joint-plans'+(resource?'/'+resource:''));error.value=''}catch(e){error.value=(e as Error).message}finally{busy.value=false}}async function create(value:unknown){const r=await request('/joint-plans'+(resource?'/runs':''),'POST',value);await load();return r}return {items,error,busy,load,create}}
+export const jointPlans=jointStore("");export const jointRuns=jointStore("runs");

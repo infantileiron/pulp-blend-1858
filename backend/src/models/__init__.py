@@ -6,3 +6,5 @@ from .review import FormulaReview
 from .report import Report
 from .user import User
 from .audit import Audit
+from .joint_plan import JointPlan
+from .joint_run import JointRun
